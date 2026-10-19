@@ -162,7 +162,7 @@ async function enrichTrackArt(track: Track): Promise<Partial<Track>> {
     console.warn('Lecture des métadonnées audio impossible', error);
   }
 
-  if (!updates.art && /\\.mp3$/i.test(track.file.name)) {
+  if (!updates.art && track.file.name.toLowerCase().endsWith('.mp3')) {
     updates.art = (await extractMp3Cover(track.file)) ?? undefined;
   }
 
@@ -173,7 +173,7 @@ async function enrichTrackArt(track: Track): Promise<Partial<Track>> {
         const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
         if (response.ok) {
           const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
-          const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+          const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
           const targetTitle = normalized(updates.title || track.title);
           const targetArtist = normalized(updates.artist || track.artist);
           const match = result.results?.find((item) => {
