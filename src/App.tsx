@@ -88,17 +88,40 @@ async function collectAudioFiles(directory: DirectoryHandle): Promise<File[]> {
   return files;
 }
 
-function makeImportedTracks(files: File[]): Track[] {
-  return files.map((file) => ({
-    title: file.name.replace(/\.[^/.]+$/, ''),
-    artist: 'Dossier importé',
-    album: 'Ma collection',
-    art: coverArt,
-    duration: '--:--',
-    src: URL.createObjectURL(file),
-    local: true,
-    file,
-    artLoaded: false,
+async function makeImportedTracks(files: File[]): Promise<Track[]> {
+  return Promise.all(files.map(async (file) => {
+    const track: Track = {
+      title: file.name.replace(/\.[^/.]+$/, ''),
+      artist: 'Artiste inconnu',
+      album: 'Ma collection',
+      art: coverArt,
+      duration: '--:--',
+      src: URL.createObjectURL(file),
+      local: true,
+      file,
+      artLoaded: false,
+    };
+
+    try {
+      const { parseBlob } = await import('music-metadata-browser');
+      const metadata = await parseBlob(file, { duration: true });
+      track.title = metadata.common.title || track.title;
+      track.artist = metadata.common.artist || track.artist;
+      track.album = metadata.common.album || track.album;
+      if (Number.isFinite(metadata.format.duration)) {
+        track.duration = formatTime(metadata.format.duration!);
+      }
+      const picture = metadata.common.picture?.[0];
+      if (picture?.data?.length) {
+        const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
+        track.art = URL.createObjectURL(new Blob([picture.data], { type: mime }));
+      }
+    } catch (error) {
+      console.warn('Impossible de lire les métadonnées de', file.name, error);
+    } finally {
+      track.artLoaded = true;
+    }
+    return track;
   }));
 }
 
@@ -174,16 +197,6 @@ function App() {
   }, [isPlaying, activeTrack.src]);
 
   useEffect(() => {
-    if (!activeTrack.local || !activeTrack.file || activeTrack.artLoaded) return;
-    let cancelled = false;
-    void extractEmbeddedArtwork(activeTrack.file).then((art) => {
-      if (cancelled) return;
-      setTracks((currentTracks) => currentTracks.map((track, index) => index === activeIndex ? { ...track, art: art ?? track.art, artLoaded: true } : track));
-    });
-    return () => { cancelled = true; };
-  }, [activeIndex, activeTrack.artLoaded, activeTrack.file, activeTrack.local]);
-
-  useEffect(() => {
     if (audioRef.current) audioRef.current.volume = volume;
   }, [volume]);
 
@@ -209,17 +222,18 @@ function App() {
     setIsPlaying(true);
   };
 
-  const importFiles = (files: File[], name: string) => {
+  const importFiles = async (files: File[], name: string) => {
     if (!files.length) return;
-    setTracks(makeImportedTracks(files));
-    setActiveIndex(0);
     setIsPlaying(false);
     setFolderName(name);
+    const importedTracks = await makeImportedTracks(files);
+    setTracks(importedTracks);
+    setActiveIndex(0);
   };
 
   const handleFolder = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith('audio/') || /\.(mp3|m4a|wav|flac)$/i.test(file.name));
-    importFiles(files, 'Sélection locale');
+    void importFiles(files, 'Sélection locale');
     event.currentTarget.value = '';
   };
 
@@ -234,7 +248,7 @@ function App() {
       const permission = await handle.requestPermission({ mode: 'read' });
       if (permission !== 'granted') return;
       await saveFolderHandle(handle);
-      importFiles(await collectAudioFiles(handle), handle.name);
+      await importFiles(await collectAudioFiles(handle), handle.name);
     } catch {
       setFolderName(null);
     }
