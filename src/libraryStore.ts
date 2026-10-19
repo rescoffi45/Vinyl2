@@ -8,6 +8,11 @@ export type StoredTrack = {
   type: string;
   size: number;
   blob: Blob;
+  title?: string;
+  artist?: string;
+  album?: string;
+  art?: string;
+  duration?: string;
 };
 
 function openDatabase(): Promise<IDBDatabase> {

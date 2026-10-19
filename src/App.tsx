@@ -1,10 +1,12 @@
 import { ChangeEvent, CSSProperties, useEffect, useRef, useState } from 'react';
 import { loadTracks, saveTracks, StoredTrack } from '@/libraryStore';
+import { extractMetadata } from '@/metadataExtractor';
 import {
   Disc3,
   FileAudio,
   FolderOpen,
   GripVertical,
+  ImagePlus,
   Menu,
   Pause,
   Play,
@@ -26,17 +28,27 @@ type Track = {
   local?: boolean;
   file?: File;
   artLoaded?: boolean;
-  artLoading?: boolean;
+  manual?: boolean;
 };
 
-const coverArt = 'https://images.pexels.com/photos/16015745/pexels-photo-16015745.jpeg?auto=compress&cs=tinysrgb&h=650&w=940';
-const secondCover = 'https://images.pexels.com/photos/29479788/pexels-photo-29479788.jpeg?auto=compress&cs=tinysrgb&h=650&w=940';
-const thirdCover = 'https://images.pexels.com/photos/28177107/pexels-photo-28177107.jpeg?auto=compress&cs=tinysrgb&h=650&w=940';
+const vinylCoverArt = "data:image/svg+xml;utf8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600">' +
+  '<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#1a1a1a"/><stop offset="20%" stop-color="#0d0d0d"/><stop offset="100%" stop-color="#000"/></radialGradient></defs>' +
+  '<rect width="600" height="600" fill="url(#g)"/>' +
+  '<circle cx="300" cy="300" r="200" fill="none" stroke="rgba(212,175,55,0.15)" stroke-width="1"/>' +
+  '<circle cx="300" cy="300" r="160" fill="none" stroke="rgba(212,175,55,0.1)" stroke-width="1"/>' +
+  '<circle cx="300" cy="300" r="120" fill="none" stroke="rgba(212,175,55,0.1)" stroke-width="1"/>' +
+  '<circle cx="300" cy="300" r="85" fill="#1a1a1a" stroke="#d4af37" stroke-width="2"/>' +
+  '<text x="300" y="295" text-anchor="middle" fill="#d4af37" font-family="serif" font-size="24" font-weight="700">MD</text>' +
+  '<text x="300" y="320" text-anchor="middle" fill="#d4af37" font-family="serif" font-size="10" letter-spacing="2">STUDIO</text>' +
+  '<circle cx="300" cy="300" r="8" fill="#000" stroke="#d4af37" stroke-width="1"/>' +
+  '</svg>'
+);
 
 const demoTracks: Track[] = [
-  { id: 'demo-1', title: 'Main Theme', artist: 'MD Studio', album: 'Neon Rooms', art: coverArt, duration: '03:42', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' },
-  { id: 'demo-2', title: 'Afterglow', artist: 'Mara Vale', album: 'Neon Rooms', art: secondCover, duration: '04:18', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3' },
-  { id: 'demo-3', title: 'Night Drive', artist: 'MD Studio', album: 'Neon Rooms', art: thirdCover, duration: '03:56', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3' },
+  { id: 'demo-1', title: 'Main Theme', artist: 'MD Studio', album: 'Neon Rooms', art: vinylCoverArt, duration: '03:42', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' },
+  { id: 'demo-2', title: 'Afterglow', artist: 'Mara Vale', album: 'Neon Rooms', art: vinylCoverArt, duration: '04:18', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3' },
+  { id: 'demo-3', title: 'Night Drive', artist: 'MD Studio', album: 'Neon Rooms', art: vinylCoverArt, duration: '03:56', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3' },
 ];
 
 type DirectoryHandle = FileSystemDirectoryHandle & {
@@ -67,7 +79,7 @@ function buildTrackFromFile(file: File): Track {
     title: file.name.replace(/\.[^/.]+$/, ''),
     artist: 'Artiste inconnu',
     album: 'Ma collection',
-    art: coverArt,
+    art: vinylCoverArt,
     duration: '--:--',
     src: URL.createObjectURL(file),
     local: true,
@@ -76,119 +88,20 @@ function buildTrackFromFile(file: File): Track {
   };
 }
 
-async function imageDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
-  const blob = new Blob([bytes], { type: mime });
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Image conversion failed'));
-    reader.onerror = () => reject(reader.error ?? new Error('Image read failed'));
-    reader.readAsDataURL(blob);
-  });
-}
-
-// Browser-side fallback for MP3 files whose ID3 APIC picture is missed by the metadata library.
-async function extractMp3Cover(file: File): Promise<string | null> {
-  try {
-    const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
-    if (header.length < 10 || String.fromCharCode(...header.slice(0, 3)) !== 'ID3') return null;
-    const version = header[3];
-    if (version < 2 || version > 4) return null;
-    const tagSize = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14) | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f);
-    const readSize = Math.min(file.size, tagSize + 10, 32 * 1024 * 1024);
-    const data = new Uint8Array(await file.slice(0, readSize).arrayBuffer());
-    let offset = 10;
-    while (offset + 10 <= data.length) {
-      const isV22 = version === 2;
-      const frameIdLength = isV22 ? 3 : 4;
-      const frameId = String.fromCharCode(...data.slice(offset, offset + frameIdLength));
-      if (!frameId.trim() || frameId.charCodeAt(0) === 0) break;
-      const headerLength = isV22 ? 6 : 10;
-      let frameSize = 0;
-      if (isV22) frameSize = (data[offset + 3] << 16) | (data[offset + 4] << 8) | data[offset + 5];
-      else if (version === 4) frameSize = ((data[offset + 4] & 0x7f) << 21) | ((data[offset + 5] & 0x7f) << 14) | ((data[offset + 6] & 0x7f) << 7) | (data[offset + 7] & 0x7f);
-      else frameSize = (data[offset + 4] * 0x1000000) + (data[offset + 5] << 16) + (data[offset + 6] << 8) + data[offset + 7];
-      if (frameSize <= 0 || offset + headerLength + frameSize > data.length) break;
-      const bodyStart = offset + headerLength;
-      const bodyEnd = bodyStart + frameSize;
-      if (frameId === (isV22 ? 'PIC' : 'APIC')) {
-        const encoding = data[bodyStart];
-        let mime = 'image/jpeg';
-        let cursor = bodyStart + 1;
-        if (isV22) {
-          const imageFormat = String.fromCharCode(...data.slice(cursor, cursor + 3)).toUpperCase();
-          mime = imageFormat === 'PNG' ? 'image/png' : 'image/jpeg';
-          cursor += 3;
-        } else {
-          const mimeStart = cursor;
-          while (cursor < bodyEnd && data[cursor] !== 0) cursor++;
-          const mimeText = new TextDecoder('latin1').decode(data.slice(mimeStart, cursor));
-          if (mimeText.startsWith('image/')) mime = mimeText;
-          cursor++;
-        }
-        cursor++; // picture type
-        if (encoding === 1 || encoding === 2) {
-          while (cursor + 1 < bodyEnd && !(data[cursor] === 0 && data[cursor + 1] === 0)) cursor += 2;
-          cursor += 2;
-        } else {
-          while (cursor < bodyEnd && data[cursor] !== 0) cursor++;
-          cursor++;
-        }
-        if (cursor < bodyEnd) return await imageDataUrl(data.slice(cursor, bodyEnd), mime);
-      }
-      offset += headerLength + frameSize;
-    }
-  } catch (error) {
-    console.warn('Lecture ID3 de secours impossible', error);
-  }
-  return null;
-}
-
-async function enrichTrackArt(track: Track): Promise<Partial<Track>> {
-  if (!track.file) return {};
-  const updates: Partial<Track> = { artLoaded: true };
-  try {
-    const { parseBlob } = await import('music-metadata-browser');
-    const metadata = await parseBlob(track.file, { duration: true });
-    if (metadata.common.title) updates.title = metadata.common.title;
-    if (metadata.common.artist) updates.artist = metadata.common.artist;
-    if (metadata.common.album) updates.album = metadata.common.album;
-    if (Number.isFinite(metadata.format.duration)) updates.duration = formatTime(metadata.format.duration!);
-    const picture = metadata.common.picture?.find((item) => item.data?.length > 0);
-    if (picture?.data?.length) {
-      const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
-      updates.art = await imageDataUrl(new Uint8Array(picture.data), mime);
-    }
-  } catch (error) {
-    console.warn('Lecture des métadonnées audio impossible', error);
-  }
-
-  if (!updates.art && track.file.name.toLowerCase().endsWith('.mp3')) {
-    updates.art = (await extractMp3Cover(track.file)) ?? undefined;
-  }
-
-  if (!updates.art) {
-    const searchTerm = [updates.artist || track.artist, updates.title || track.title].filter(Boolean).join(' ');
-    if (searchTerm) {
-      try {
-        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
-        if (response.ok) {
-          const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
-          const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
-          const targetTitle = normalized(updates.title || track.title);
-          const targetArtist = normalized(updates.artist || track.artist);
-          const match = result.results?.find((item) => {
-            const title = normalized(item.trackName || '');
-            const artist = normalized(item.artistName || '');
-            return item.artworkUrl100 && title && targetTitle && title.includes(targetTitle) && (!targetArtist || artist.includes(targetArtist));
-          }) ?? result.results?.find((item) => item.artworkUrl100);
-          if (match?.artworkUrl100) updates.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
-        }
-      } catch (error) {
-        console.warn('Recherche de pochette en ligne impossible', error);
-      }
-    }
-  }
-  return updates;
+function buildTrackFromStored(item: StoredTrack): Track {
+  const file = new File([item.blob], item.name, { type: item.type });
+  return {
+    id: item.id,
+    title: item.title || item.name.replace(/\.[^/.]+$/, ''),
+    artist: item.artist || 'Artiste inconnu',
+    album: item.album || 'Ma collection',
+    art: item.art || vinylCoverArt,
+    duration: item.duration || '--:--',
+    src: URL.createObjectURL(file),
+    local: true,
+    file,
+    artLoaded: true,
+  };
 }
 
 function formatTime(value: number) {
@@ -199,6 +112,8 @@ function formatTime(value: number) {
 function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const filePickerRef = useRef<HTMLInputElement>(null);
+  const artInputRef = useRef<HTMLInputElement>(null);
+  const inFlightEnrichments = useRef<Set<string>>(new Set());
   const [tracks, setTracks] = useState<Track[]>(demoTracks);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -208,11 +123,30 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
   const [folderName, setFolderName] = useState<string | null>(null);
+  const [enrichStatus, setEnrichStatus] = useState<string | null>(null);
 
   const activeTrack = tracks[activeIndex] ?? demoTracks[0];
 
   const updateTrack = (id: string, updates: Partial<Track>) => {
     setTracks((currentTracks) => currentTracks.map((track) => track.id === id ? { ...track, ...updates } : track));
+  };
+
+  const enrichTrack = (track: Track) => {
+    if (!track.file || track.artLoaded || track.manual || inFlightEnrichments.current.has(track.id)) return;
+    inFlightEnrichments.current.add(track.id);
+    setEnrichStatus(`Lecture des métadonnées…`);
+    void extractMetadata(track.file).then((metadata) => {
+      inFlightEnrichments.current.delete(track.id);
+      const updates: Partial<Track> = { artLoaded: true };
+      if (metadata.title) updates.title = metadata.title;
+      if (metadata.artist) updates.artist = metadata.artist;
+      if (metadata.album) updates.album = metadata.album;
+      if (metadata.duration) updates.duration = metadata.duration;
+      if (metadata.art) updates.art = metadata.art;
+      updateTrack(track.id, updates);
+      setEnrichStatus(metadata.art ? 'Pochette extraite' : 'Aucune pochette trouvée');
+      persistTrackMetadata(track.id, updates);
+    });
   };
 
   useEffect(() => {
@@ -222,7 +156,7 @@ function App() {
         const stored = await loadTracks();
         if (!stored.length || cancelled) return;
         setFolderName('Collection sauvegardée');
-        const restoredTracks = stored.map((item) => buildTrackFromFile(new File([item.blob], item.name, { type: item.type })));
+        const restoredTracks = stored.map((item) => buildTrackFromStored(item));
         setTracks(restoredTracks);
         setActiveIndex(0);
         setIsPlaying(false);
@@ -235,16 +169,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeTrack.local || !activeTrack.file || activeTrack.artLoaded || activeTrack.artLoading) return;
-    updateTrack(activeTrack.id, { artLoading: true });
-    let cancelled = false;
-    void enrichTrackArt(activeTrack).then((updates) => {
-      if (cancelled) return;
-      updateTrack(activeTrack.id, { ...updates, artLoading: false });
-    });
-    return () => { cancelled = true; };
+    if (activeTrack.local && !activeTrack.artLoaded && !activeTrack.manual) {
+      enrichTrack(activeTrack);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndex, activeTrack.id, activeTrack.artLoaded, activeTrack.artLoading, activeTrack.file, activeTrack.local]);
+  }, [activeIndex, activeTrack.id, activeTrack.artLoaded, activeTrack.manual]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -307,6 +236,7 @@ function App() {
     } catch {
       // storage optional
     }
+    importedTracks.forEach((track) => enrichTrack(track));
   };
 
   const handleFolder = (event: ChangeEvent<HTMLInputElement>) => {
@@ -337,6 +267,31 @@ function App() {
     setCurrentTime(value);
   };
 
+  const persistTrackMetadata = async (id: string, updates: Partial<Track>) => {
+    try {
+      const stored = await loadTracks();
+      const target = stored.find((item) => item.id === id);
+      if (!target) return;
+      if (updates.title) target.title = updates.title;
+      if (updates.artist) target.artist = updates.artist;
+      if (updates.album) target.album = updates.album;
+      if (updates.duration) target.duration = updates.duration;
+      if (updates.art && !updates.art.startsWith('blob:')) target.art = updates.art;
+      await saveTracks(stored);
+    } catch {
+      // persistence optional
+    }
+  };
+
+  const handleManualArt = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const art = URL.createObjectURL(file);
+    updateTrack(activeTrack.id, { art, manual: true, artLoaded: true });
+    void persistTrackMetadata(activeTrack.id, { art });
+    event.currentTarget.value = '';
+  };
+
   return (
     <main className="app-shell" style={{ '--cover': `url(${activeTrack.art})` } as CSSProperties}>
       <div className="ambient-light" />
@@ -359,7 +314,7 @@ function App() {
           {tracks.map((track, index) => (
             <button className={`track-row ${index === activeIndex ? 'active' : ''}`} key={`${track.title}-${index}`} onClick={() => selectTrack(index)}>
               <span className="track-number">{(index + 1).toString().padStart(2, '0')}</span>
-              <img className="track-row-art" src={track.art || coverArt} alt={`Pochette de ${track.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
+              <img className="track-row-art" src={track.art || vinylCoverArt} alt={`Pochette de ${track.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = vinylCoverArt; }} />
               <span className="track-row-info"><strong>{track.title}</strong><small>{track.artist}</small></span>
               {index === activeIndex && <span className="equalizer"><i /><i /><i /></span>}
             </button>
@@ -384,14 +339,16 @@ function App() {
       <section className={`player ${sidebarOpen ? '' : 'wide'}`}>
         <header className="topbar">
           <div className="now-playing-label"><span className="live-dot" /> NOW SPINNING</div>
-          <span className="collection-label">{activeTrack.local ? 'LOCAL FILES' : 'AUDIO ARCHIVE'} <GripVertical size={15} /></span>
+          <span className="collection-label">{activeTrack.local ? 'LOCAL FILES' : 'AUDIO ARCHIVE'} {enrichStatus && <span className="enrich-status">{enrichStatus}</span>} <GripVertical size={15} /></span>
         </header>
 
         <div className="stage">
           <div className="album-card-wrap">
             <div className="album-card">
-              <img className="album-card-image" src={activeTrack.art || coverArt} alt={`Pochette de ${activeTrack.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
+              <img className="album-card-image" src={activeTrack.art || vinylCoverArt} alt={`Pochette de ${activeTrack.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = vinylCoverArt; }} />
               <div className="album-card-overlay"><span>MD</span><small>{activeTrack.album.toUpperCase()}</small></div>
+              <button type="button" className="manual-art-button" onClick={() => artInputRef.current?.click()} aria-label="Téléverser une pochette"><ImagePlus size={16} /></button>
+              <input ref={artInputRef} type="file" accept="image/*" onChange={handleManualArt} hidden />
             </div>
             <div className="card-caption"><span>01 / 03</span><span>{activeTrack.album}</span></div>
           </div>
@@ -401,7 +358,7 @@ function App() {
             <div className={`vinyl ${isPlaying ? 'is-playing' : ''} ${isDragging ? 'is-scratching' : ''}`} onPointerDown={() => setIsDragging(true)} onPointerUp={() => setIsDragging(false)} onPointerCancel={() => setIsDragging(false)}>
               <div className="vinyl-rings" />
               <div className="vinyl-label">
-                <img className="vinyl-label-image" src={activeTrack.art || coverArt} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
+                <img className="vinyl-label-image" src={activeTrack.art || vinylCoverArt} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = vinylCoverArt; }} />
                 <span>MD<br /><small>STUDIO</small></span>
               </div>
               <div className="vinyl-hole" />
