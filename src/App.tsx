@@ -289,7 +289,7 @@ function App() {
           {tracks.map((track, index) => (
             <button className={`track-row ${index === activeIndex ? 'active' : ''}`} key={`${track.title}-${index}`} onClick={() => selectTrack(index)}>
               <span className="track-number">{(index + 1).toString().padStart(2, '0')}</span>
-              <span className="track-row-art" style={{ backgroundImage: `url(${track.art})` }} />
+              <img className="track-row-art" src={track.art || coverArt} alt={`Pochette de ${track.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
               <span className="track-row-info"><strong>{track.title}</strong><small>{track.artist}</small></span>
               {index === activeIndex && <span className="equalizer"><i /><i /><i /></span>}
             </button>
@@ -319,7 +319,8 @@ function App() {
 
         <div className="stage">
           <div className="album-card-wrap">
-            <div className="album-card" style={{ backgroundImage: `url(${activeTrack.art})` }}>
+            <div className="album-card">
+              <img className="album-card-image" src={activeTrack.art || coverArt} alt={`Pochette de ${activeTrack.title}`} onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
               <div className="album-card-overlay"><span>MD</span><small>{activeTrack.album.toUpperCase()}</small></div>
             </div>
             <div className="card-caption"><span>01 / 03</span><span>{activeTrack.album}</span></div>
@@ -329,7 +330,10 @@ function App() {
             <div className="turntable-shadow" />
             <div className={`vinyl ${isPlaying ? 'is-playing' : ''} ${isDragging ? 'is-scratching' : ''}`} onPointerDown={() => setIsDragging(true)} onPointerUp={() => setIsDragging(false)} onPointerCancel={() => setIsDragging(false)}>
               <div className="vinyl-rings" />
-              <div className="vinyl-label" style={{ backgroundImage: `url(${activeTrack.art})` }}><span>MD<br /><small>STUDIO</small></span></div>
+              <div className="vinyl-label">
+                <img className="vinyl-label-image" src={activeTrack.art || coverArt} alt="" onError={(event) => { event.currentTarget.onerror = null; event.currentTarget.src = coverArt; }} />
+                <span>MD<br /><small>STUDIO</small></span>
+              </div>
               <div className="vinyl-hole" />
             </div>
             <div className={`tonearm ${isPlaying ? 'is-playing' : ''}`}><div className="tonearm-pivot" /><div className="tonearm-bar"><div className="needle" /></div></div>
