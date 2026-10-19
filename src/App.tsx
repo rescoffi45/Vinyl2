@@ -76,49 +76,119 @@ function buildTrackFromFile(file: File): Track {
   };
 }
 
+async function imageDataUrl(bytes: Uint8Array, mime: string): Promise<string> {
+  const blob = new Blob([bytes], { type: mime });
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Image conversion failed'));
+    reader.onerror = () => reject(reader.error ?? new Error('Image read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Browser-side fallback for MP3 files whose ID3 APIC picture is missed by the metadata library.
+async function extractMp3Cover(file: File): Promise<string | null> {
+  try {
+    const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (header.length < 10 || String.fromCharCode(...header.slice(0, 3)) !== 'ID3') return null;
+    const version = header[3];
+    if (version < 2 || version > 4) return null;
+    const tagSize = ((header[6] & 0x7f) << 21) | ((header[7] & 0x7f) << 14) | ((header[8] & 0x7f) << 7) | (header[9] & 0x7f);
+    const readSize = Math.min(file.size, tagSize + 10, 32 * 1024 * 1024);
+    const data = new Uint8Array(await file.slice(0, readSize).arrayBuffer());
+    let offset = 10;
+    while (offset + 10 <= data.length) {
+      const isV22 = version === 2;
+      const frameIdLength = isV22 ? 3 : 4;
+      const frameId = String.fromCharCode(...data.slice(offset, offset + frameIdLength));
+      if (!frameId.trim() || /^\\x00+$/.test(frameId)) break;
+      const headerLength = isV22 ? 6 : 10;
+      let frameSize = 0;
+      if (isV22) frameSize = (data[offset + 3] << 16) | (data[offset + 4] << 8) | data[offset + 5];
+      else if (version === 4) frameSize = ((data[offset + 4] & 0x7f) << 21) | ((data[offset + 5] & 0x7f) << 14) | ((data[offset + 6] & 0x7f) << 7) | (data[offset + 7] & 0x7f);
+      else frameSize = (data[offset + 4] * 0x1000000) + (data[offset + 5] << 16) + (data[offset + 6] << 8) + data[offset + 7];
+      if (frameSize <= 0 || offset + headerLength + frameSize > data.length) break;
+      const bodyStart = offset + headerLength;
+      const bodyEnd = bodyStart + frameSize;
+      if (frameId === (isV22 ? 'PIC' : 'APIC')) {
+        const encoding = data[bodyStart];
+        let mime = 'image/jpeg';
+        let cursor = bodyStart + 1;
+        if (isV22) {
+          const imageFormat = String.fromCharCode(...data.slice(cursor, cursor + 3)).toUpperCase();
+          mime = imageFormat === 'PNG' ? 'image/png' : 'image/jpeg';
+          cursor += 3;
+        } else {
+          const mimeStart = cursor;
+          while (cursor < bodyEnd && data[cursor] !== 0) cursor++;
+          const mimeText = new TextDecoder('latin1').decode(data.slice(mimeStart, cursor));
+          if (mimeText.startsWith('image/')) mime = mimeText;
+          cursor++;
+        }
+        cursor++; // picture type
+        if (encoding === 1 || encoding === 2) {
+          while (cursor + 1 < bodyEnd && !(data[cursor] === 0 && data[cursor + 1] === 0)) cursor += 2;
+          cursor += 2;
+        } else {
+          while (cursor < bodyEnd && data[cursor] !== 0) cursor++;
+          cursor++;
+        }
+        if (cursor < bodyEnd) return await imageDataUrl(data.slice(cursor, bodyEnd), mime);
+      }
+      offset += headerLength + frameSize;
+    }
+  } catch (error) {
+    console.warn('Lecture ID3 de secours impossible', error);
+  }
+  return null;
+}
+
 async function enrichTrackArt(track: Track): Promise<Partial<Track>> {
   if (!track.file) return {};
+  const updates: Partial<Track> = { artLoaded: true };
   try {
     const { parseBlob } = await import('music-metadata-browser');
     const metadata = await parseBlob(track.file, { duration: true });
-    const updates: Partial<Track> = { artLoaded: true };
     if (metadata.common.title) updates.title = metadata.common.title;
     if (metadata.common.artist) updates.artist = metadata.common.artist;
     if (metadata.common.album) updates.album = metadata.common.album;
-    if (Number.isFinite(metadata.format.duration)) {
-      updates.duration = formatTime(metadata.format.duration!);
-    }
+    if (Number.isFinite(metadata.format.duration)) updates.duration = formatTime(metadata.format.duration!);
     const picture = metadata.common.picture?.find((item) => item.data?.length > 0);
     if (picture?.data?.length) {
       const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
-      const imageBytes = new Uint8Array(picture.data);
-      updates.art = URL.createObjectURL(new Blob([imageBytes], { type: mime }));
-    } else {
-      const searchTerm = [metadata.common.artist, metadata.common.title].filter(Boolean).join(' ');
-      if (searchTerm) {
-        try {
-          const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
-          if (response.ok) {
-            const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
-            const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-            const match = result.results?.find((item) =>
-              item.artworkUrl100 &&
-              (normalized(item.trackName || '').includes(normalized(track.title)) ||
-                normalized(track.title).includes(normalized(item.trackName || '')))
-            ) ?? result.results?.find((item) => item.artworkUrl100);
-            if (match?.artworkUrl100) {
-              updates.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
-            }
-          }
-        } catch {
-          // lookup optional
+      updates.art = await imageDataUrl(new Uint8Array(picture.data), mime);
+    }
+  } catch (error) {
+    console.warn('Lecture des métadonnées audio impossible', error);
+  }
+
+  if (!updates.art && /\\.mp3$/i.test(track.file.name)) {
+    updates.art = (await extractMp3Cover(track.file)) ?? undefined;
+  }
+
+  if (!updates.art) {
+    const searchTerm = [updates.artist || track.artist, updates.title || track.title].filter(Boolean).join(' ');
+    if (searchTerm) {
+      try {
+        const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
+        if (response.ok) {
+          const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
+          const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+          const targetTitle = normalized(updates.title || track.title);
+          const targetArtist = normalized(updates.artist || track.artist);
+          const match = result.results?.find((item) => {
+            const title = normalized(item.trackName || '');
+            const artist = normalized(item.artistName || '');
+            return item.artworkUrl100 && title && targetTitle && title.includes(targetTitle) && (!targetArtist || artist.includes(targetArtist));
+          }) ?? result.results?.find((item) => item.artworkUrl100);
+          if (match?.artworkUrl100) updates.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
         }
+      } catch (error) {
+        console.warn('Recherche de pochette en ligne impossible', error);
       }
     }
-    return updates;
-  } catch {
-    return { artLoaded: true };
   }
+  return updates;
 }
 
 function formatTime(value: number) {
