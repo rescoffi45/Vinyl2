@@ -1,4 +1,5 @@
 import { ChangeEvent, CSSProperties, useEffect, useRef, useState } from 'react';
+import { loadTracks, saveTracks, StoredTrack } from '@/libraryStore';
 import {
   Disc3,
   FileAudio,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 
 type Track = {
+  id: string;
   title: string;
   artist: string;
   album: string;
@@ -24,6 +26,7 @@ type Track = {
   local?: boolean;
   file?: File;
   artLoaded?: boolean;
+  artLoading?: boolean;
 };
 
 const coverArt = 'https://images.pexels.com/photos/16015745/pexels-photo-16015745.jpeg?auto=compress&cs=tinysrgb&h=650&w=940';
@@ -31,9 +34,9 @@ const secondCover = 'https://images.pexels.com/photos/29479788/pexels-photo-2947
 const thirdCover = 'https://images.pexels.com/photos/28177107/pexels-photo-28177107.jpeg?auto=compress&cs=tinysrgb&h=650&w=940';
 
 const demoTracks: Track[] = [
-  { title: 'Main Theme', artist: 'MD Studio', album: 'Neon Rooms', art: coverArt, duration: '03:42', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' },
-  { title: 'Afterglow', artist: 'Mara Vale', album: 'Neon Rooms', art: secondCover, duration: '04:18', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3' },
-  { title: 'Night Drive', artist: 'MD Studio', album: 'Neon Rooms', art: thirdCover, duration: '03:56', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3' },
+  { id: 'demo-1', title: 'Main Theme', artist: 'MD Studio', album: 'Neon Rooms', art: coverArt, duration: '03:42', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' },
+  { id: 'demo-2', title: 'Afterglow', artist: 'Mara Vale', album: 'Neon Rooms', art: secondCover, duration: '04:18', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3' },
+  { id: 'demo-3', title: 'Night Drive', artist: 'MD Studio', album: 'Neon Rooms', art: thirdCover, duration: '03:56', src: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3' },
 ];
 
 type DirectoryHandle = FileSystemDirectoryHandle & {
@@ -46,40 +49,10 @@ type DirectoryPickerWindow = Window & {
   showDirectoryPicker?: () => Promise<DirectoryHandle>;
 };
 
-function openFolderStore(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('md-vinyl-library', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('settings');
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function saveFolderHandle(handle: DirectoryHandle) {
-  const database = await openFolderStore();
-  await new Promise<void>((resolve, reject) => {
-    const request = database.transaction('settings', 'readwrite').objectStore('settings').put(handle, 'music-folder');
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
-  database.close();
-}
-
-async function readFolderHandle(): Promise<DirectoryHandle | null> {
-  const database = await openFolderStore();
-  const handle = await new Promise<DirectoryHandle | null>((resolve, reject) => {
-    const request = database.transaction('settings', 'readonly').objectStore('settings').get('music-folder');
-    request.onsuccess = () => resolve(request.result ?? null);
-    request.onerror = () => reject(request.error);
-  });
-  database.close();
-  return handle;
-}
-
 async function collectAudioFiles(directory: DirectoryHandle): Promise<File[]> {
   const files: File[] = [];
   for await (const entry of directory.values()) {
-    if (entry.kind === 'file' && (entry.name.toLowerCase().endsWith('.mp3') || entry.name.toLowerCase().endsWith('.m4a') || entry.name.toLowerCase().endsWith('.wav') || entry.name.toLowerCase().endsWith('.flac'))) {
+    if (entry.kind === 'file' && /\.(mp3|m4a|wav|flac|ogg)$/i.test(entry.name)) {
       files.push(await (entry as FileSystemFileHandle).getFile());
     } else if (entry.kind === 'directory') {
       files.push(...await collectAudioFiles(entry as DirectoryHandle));
@@ -88,65 +61,64 @@ async function collectAudioFiles(directory: DirectoryHandle): Promise<File[]> {
   return files;
 }
 
-async function makeImportedTracks(files: File[]): Promise<Track[]> {
-  return Promise.all(files.map(async (file) => {
-    const track: Track = {
-      title: file.name.replace(/\.[^/.]+$/, ''),
-      artist: 'Artiste inconnu',
-      album: 'Ma collection',
-      art: coverArt,
-      duration: '--:--',
-      src: URL.createObjectURL(file),
-      local: true,
-      file,
-      artLoaded: false,
-    };
+function buildTrackFromFile(file: File): Track {
+  return {
+    id: `${file.name}-${file.size}-${file.lastModified}`,
+    title: file.name.replace(/\.[^/.]+$/, ''),
+    artist: 'Artiste inconnu',
+    album: 'Ma collection',
+    art: coverArt,
+    duration: '--:--',
+    src: URL.createObjectURL(file),
+    local: true,
+    file,
+    artLoaded: false,
+  };
+}
 
-    try {
-      const { parseBlob } = await import('music-metadata-browser');
-      const metadata = await parseBlob(file, { duration: true });
-      track.title = metadata.common.title || track.title;
-      track.artist = metadata.common.artist || track.artist;
-      track.album = metadata.common.album || track.album;
-      if (Number.isFinite(metadata.format.duration)) {
-        track.duration = formatTime(metadata.format.duration!);
-      }
-      const picture = metadata.common.picture?.find((item) => item.data?.length > 0);
-      if (picture?.data?.length) {
-        const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
-        // Copy bytes into a fresh Uint8Array to avoid Blob issues on some mobile browsers.
-        const imageBytes = new Uint8Array(picture.data);
-        track.art = URL.createObjectURL(new Blob([imageBytes], { type: mime }));
-      } else {
-        // Some players show artwork from an online catalogue even when the MP3 has no embedded image.
-        const searchTerm = [track.artist !== 'Artiste inconnu' ? track.artist : '', track.title].filter(Boolean).join(' ');
-        if (searchTerm) {
-          try {
-            const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
-            if (response.ok) {
-              const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
-              const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-              const match = result.results?.find((item) =>
-                item.artworkUrl100 &&
-                (normalized(item.trackName || '').includes(normalized(track.title)) ||
-                  normalized(track.title).includes(normalized(item.trackName || '')))
-              ) ?? result.results?.find((item) => item.artworkUrl100);
-              if (match?.artworkUrl100) {
-                track.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
-              }
+async function enrichTrackArt(track: Track): Promise<Partial<Track>> {
+  if (!track.file) return {};
+  try {
+    const { parseBlob } = await import('music-metadata-browser');
+    const metadata = await parseBlob(track.file, { duration: true });
+    const updates: Partial<Track> = { artLoaded: true };
+    if (metadata.common.title) updates.title = metadata.common.title;
+    if (metadata.common.artist) updates.artist = metadata.common.artist;
+    if (metadata.common.album) updates.album = metadata.common.album;
+    if (Number.isFinite(metadata.format.duration)) {
+      updates.duration = formatTime(metadata.format.duration!);
+    }
+    const picture = metadata.common.picture?.find((item) => item.data?.length > 0);
+    if (picture?.data?.length) {
+      const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
+      const imageBytes = new Uint8Array(picture.data);
+      updates.art = URL.createObjectURL(new Blob([imageBytes], { type: mime }));
+    } else {
+      const searchTerm = [metadata.common.artist, metadata.common.title].filter(Boolean).join(' ');
+      if (searchTerm) {
+        try {
+          const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
+          if (response.ok) {
+            const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
+            const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+            const match = result.results?.find((item) =>
+              item.artworkUrl100 &&
+              (normalized(item.trackName || '').includes(normalized(track.title)) ||
+                normalized(track.title).includes(normalized(item.trackName || '')))
+            ) ?? result.results?.find((item) => item.artworkUrl100);
+            if (match?.artworkUrl100) {
+              updates.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
             }
-          } catch (lookupError) {
-            console.warn('Recherche de pochette en ligne impossible pour', file.name, lookupError);
           }
+        } catch {
+          // lookup optional
         }
       }
-    } catch (error) {
-      console.warn('Impossible de lire les métadonnées de', file.name, error);
-    } finally {
-      track.artLoaded = true;
     }
-    return track;
-  }));
+    return updates;
+  } catch {
+    return { artLoaded: true };
+  }
 }
 
 function formatTime(value: number) {
@@ -169,28 +141,40 @@ function App() {
 
   const activeTrack = tracks[activeIndex] ?? demoTracks[0];
 
+  const updateTrack = (id: string, updates: Partial<Track>) => {
+    setTracks((currentTracks) => currentTracks.map((track) => track.id === id ? { ...track, ...updates } : track));
+  };
+
   useEffect(() => {
     let cancelled = false;
-    const restoreFolder = async () => {
+    const restoreLibrary = async () => {
       try {
-        const handle = await readFolderHandle();
-        if (!handle || cancelled) return;
-        const permission = await handle.queryPermission({ mode: 'read' });
-        setFolderName(handle.name);
-        if (permission !== 'granted') return;
-        const files = await collectAudioFiles(handle);
-        if (!cancelled && files.length) {
-          setTracks(makeImportedTracks(files));
-          setActiveIndex(0);
-          setIsPlaying(false);
-        }
+        const stored = await loadTracks();
+        if (!stored.length || cancelled) return;
+        setFolderName('Collection sauvegardée');
+        const restoredTracks = stored.map((item) => buildTrackFromFile(new File([item.blob], item.name, { type: item.type })));
+        setTracks(restoredTracks);
+        setActiveIndex(0);
+        setIsPlaying(false);
       } catch {
         setFolderName(null);
       }
     };
-    void restoreFolder();
+    void restoreLibrary();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!activeTrack.local || !activeTrack.file || activeTrack.artLoaded || activeTrack.artLoading) return;
+    updateTrack(activeTrack.id, { artLoading: true });
+    let cancelled = false;
+    void enrichTrackArt(activeTrack).then((updates) => {
+      if (cancelled) return;
+      updateTrack(activeTrack.id, { ...updates, artLoading: false });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex, activeTrack.id, activeTrack.artLoaded, activeTrack.artLoading, activeTrack.file, activeTrack.local]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -238,9 +222,21 @@ function App() {
     if (!files.length) return;
     setIsPlaying(false);
     setFolderName(name);
-    const importedTracks = await makeImportedTracks(files);
+    const importedTracks = files.map((file) => buildTrackFromFile(file));
     setTracks(importedTracks);
     setActiveIndex(0);
+    const stored: StoredTrack[] = files.map((file) => ({
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      name: file.name,
+      type: file.type || 'audio/mpeg',
+      size: file.size,
+      blob: file,
+    }));
+    try {
+      await saveTracks(stored);
+    } catch {
+      // storage optional
+    }
   };
 
   const handleFolder = (event: ChangeEvent<HTMLInputElement>) => {
@@ -259,8 +255,8 @@ function App() {
       const handle = await picker.showDirectoryPicker();
       const permission = await handle.requestPermission({ mode: 'read' });
       if (permission !== 'granted') return;
-      await saveFolderHandle(handle);
-      await importFiles(await collectAudioFiles(handle), handle.name);
+      const files = await collectAudioFiles(handle);
+      await importFiles(files, handle.name);
     } catch {
       setFolderName(null);
     }
