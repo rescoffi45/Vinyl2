@@ -125,7 +125,7 @@ async function makeImportedTracks(files: File[]): Promise<Track[]> {
             const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
             if (response.ok) {
               const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
-              const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+              const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
               const match = result.results?.find((item) =>
                 item.artworkUrl100 &&
                 (normalized(item.trackName || '').includes(normalized(track.title)) ||
