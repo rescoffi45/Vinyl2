@@ -111,10 +111,34 @@ async function makeImportedTracks(files: File[]): Promise<Track[]> {
       if (Number.isFinite(metadata.format.duration)) {
         track.duration = formatTime(metadata.format.duration!);
       }
-      const picture = metadata.common.picture?.[0];
+      const picture = metadata.common.picture?.find((item) => item.data?.length > 0);
       if (picture?.data?.length) {
         const mime = picture.format?.startsWith('image/') ? picture.format : 'image/jpeg';
-        track.art = URL.createObjectURL(new Blob([picture.data], { type: mime }));
+        // Copy bytes into a fresh Uint8Array to avoid Blob issues on some mobile browsers.
+        const imageBytes = new Uint8Array(picture.data);
+        track.art = URL.createObjectURL(new Blob([imageBytes], { type: mime }));
+      } else {
+        // Some players show artwork from an online catalogue even when the MP3 has no embedded image.
+        const searchTerm = [track.artist !== 'Artiste inconnu' ? track.artist : '', track.title].filter(Boolean).join(' ');
+        if (searchTerm) {
+          try {
+            const response = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=song&limit=5`);
+            if (response.ok) {
+              const result = await response.json() as { results?: Array<{ trackName?: string; artistName?: string; artworkUrl100?: string }> };
+              const normalized = (value: string) => value.toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, '');
+              const match = result.results?.find((item) =>
+                item.artworkUrl100 &&
+                (normalized(item.trackName || '').includes(normalized(track.title)) ||
+                  normalized(track.title).includes(normalized(item.trackName || '')))
+              ) ?? result.results?.find((item) => item.artworkUrl100);
+              if (match?.artworkUrl100) {
+                track.art = match.artworkUrl100.replace('100x100bb', '600x600bb');
+              }
+            }
+          } catch (lookupError) {
+            console.warn('Recherche de pochette en ligne impossible pour', file.name, lookupError);
+          }
+        }
       }
     } catch (error) {
       console.warn('Impossible de lire les métadonnées de', file.name, error);
