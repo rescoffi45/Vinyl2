@@ -101,7 +101,7 @@ async function extractMp3Cover(file: File): Promise<string | null> {
       const isV22 = version === 2;
       const frameIdLength = isV22 ? 3 : 4;
       const frameId = String.fromCharCode(...data.slice(offset, offset + frameIdLength));
-      if (!frameId.trim() || /^\\x00+$/.test(frameId)) break;
+      if (!frameId.trim() || frameId.charCodeAt(0) === 0) break;
       const headerLength = isV22 ? 6 : 10;
       let frameSize = 0;
       if (isV22) frameSize = (data[offset + 3] << 16) | (data[offset + 4] << 8) | data[offset + 5];
