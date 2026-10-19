@@ -130,18 +130,6 @@ function formatTime(value: number) {
   return `${Math.floor(value / 60).toString().padStart(2, '0')}:${Math.floor(value % 60).toString().padStart(2, '0')}`;
 }
 
-async function extractEmbeddedArtwork(file: File): Promise<string | null> {
-  try {
-    const { parseBlob } = await import('music-metadata-browser');
-    const metadata = await parseBlob(file);
-    const picture = metadata.common.picture?.[0];
-    if (!picture) return null;
-    return URL.createObjectURL(new Blob([picture.data], { type: picture.format || 'image/jpeg' }));
-  } catch {
-    return null;
-  }
-}
-
 function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const filePickerRef = useRef<HTMLInputElement>(null);
